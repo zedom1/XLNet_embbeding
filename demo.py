@@ -2,12 +2,12 @@
 
 import os
 import keras
-from xlnet_embedding import get_embbeding
+from xlnet_embedding import sentence2idx, idx2sentence, XlnetEmbedding
 from keras.layers import Dense, Input, GlobalAveragePooling1D
 from keras.models import Model
 from keras.optimizers import Adam
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import classification_report
+from sklearn.metrics import classification_report, accuracy_score
 from keras.callbacks import ModelCheckpoint, EarlyStopping
 import numpy as np
 import codecs
@@ -18,7 +18,7 @@ class f1_callback(keras.callbacks.Callback):
 		self.y_val = val_data[1]
 
 	def on_epoch_end(self, epoch, logs={}):        
-		y_pred = self.model.predict(self.x_val, batch_size=1)
+		y_pred = self.model.predict(self.x_val, batch_size=model_hyper["batch_size"])
 		y_pred = np.argmax(y_pred, axis=1)
 		y_val = np.argmax(self.y_val, axis=1)
 		result = classification_report(y_val, y_pred)      
@@ -33,8 +33,8 @@ def get_config():
 	model_hyper = {
 		'len_max': 30,  # 句子最大长度, 固定推荐20-50, bert越长会越慢, 占用空间也会变大, 小心OOM
 		'label': 10,  # 类别数
-		'batch_size': 8,  
-		'epochs': 20,  # 训练最大轮次
+		'batch_size': 16,  
+		'epochs': 5,  # 训练最大轮次
 		'patience': 3, # 早停,2-3就好
 		'lr': 5e-5,  # 学习率
 		'model_path': './model/model.h5', # 模型保存地址
@@ -46,7 +46,7 @@ def get_config():
 		# 微调后保存地址
 		'path_fineture': "./model/embedding_trainable.h5",
 		# 选择输出的层数 范围 [0, 12(24)], 12或24取决于用的是base还是mid, -1即最后一层 12/24
-		'layer_indexes': [-1, -2],       
+		'layer_indexes': [-2],       
 		'len_max': model_hyper["len_max"],
 		'batch_size': model_hyper["batch_size"],
 		# 是否微调embedding
@@ -55,7 +55,7 @@ def get_config():
 		'attention_type': 'bi',  
 		'memory_len': 0,
 		# 选择多层输出时处理多层输出的方式： ["add", "avg", "max", "concat"]
-		'merge_type': "concat"
+		'merge_type': "add"
 	}
 
 # 自行修改文本处理方式
@@ -66,6 +66,10 @@ def process_data(filename, mode = "train"):
 		X, y = [], []
 		for line in f:
 			line = line.strip().split("\t")
+			if len(line)<2:
+				continue
+			# 双输入要以tuple形式保存   即  X.append( ("text1", "text2") )
+			#X.append((line[0].replace(" ", "")[:len(line[0].replace(" ", ""))//2], line[0].replace(" ", "")[len(line[0].replace(" ", ""))//2:]))
 			X.append(line[0].replace(" ", ""))
 			y.append(int(line[1]))
 		X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.1, random_state=42)
@@ -83,8 +87,12 @@ def process_data(filename, mode = "train"):
 		X, y = [], []
 		for line in f:
 			line = line.strip().split("\t")
+			if len(line)<2:
+				continue
 			X.append(line[0].replace(" ", ""))
+			#X.append((line[0].replace(" ", "")[:len(line[0].replace(" ", ""))//2], line[0].replace(" ", "")[len(line[0].replace(" ", ""))//2:]))
 			y.append(int(line[1]))
+		print(np.shape(X))
 		return X, y
 
 	def process_predict():
@@ -94,6 +102,7 @@ def process_data(filename, mode = "train"):
 		for line in f:
 			line = line.strip()
 			X.append(line.replace(" ", ""))
+			#X.append((line.replace(" ", "")[:len(line.replace(" ", ""))//2], line.replace(" ", "")[len(line.replace(" ", ""))//2:]))
 		return X
 
 	if mode == "train":
@@ -104,8 +113,12 @@ def process_data(filename, mode = "train"):
 
 def encode_data(X, y=None):
 	x = []
+
 	for sample in X:
-		encoded = embedding.sentence2idx(sample)
+		if type(sample)==tuple and len(sample)==2:
+			encoded = sentence2idx(xlnet_hyper["len_max"], sample[0], sample[1])
+		else:
+			encoded = sentence2idx(xlnet_hyper["len_max"], sample)
 		x.append(encoded)
 
 	x_1 = np.array([i[0][0] for i in x])
@@ -129,6 +142,8 @@ def encode_data(X, y=None):
 
 def create_model():
 	
+	if embedding.built==False:
+		embedding.build()
 	emb = embedding.output
 	# 自行修改embedding后的模型结构
 	# fast text
@@ -141,17 +156,14 @@ def create_model():
 def init():
 	global embedding
 	get_config()
-	# 要先加载xlnet，用xlnet的spiece对文本编码
-	embedding = get_embbeding(xlnet_hyper)
+	embedding = XlnetEmbedding(hyper_parameters=xlnet_hyper)
 
 def train(filename):
 	X_train, X_val, y_train, y_val = process_data(filename, mode="train")
-	print(np.shape(X_train))
-	print(np.shape(X_val))
 	model = create_model()
 	encoded_x_train, encoded_y_train = encode_data(X_train, y_train)
 	encoded_x_val, encoded_y_val = encode_data(X_val, y_val)
-	
+
 	model.compile(
 		optimizer = Adam(lr=model_hyper["lr"], beta_1=0.9, beta_2=0.999, decay=0.0),
 		loss = 'categorical_crossentropy',
@@ -185,11 +197,13 @@ def test(filename):
 	encoded_x_test, encoded_y_test = encode_data(X_test, y_test)
 
 	# batsh_size 可以改大一点，但是必须可以整除测试样本数量
-	y_pred = model.predict(encoded_x_test, batch_size = 1)
+	y_pred = model.predict(encoded_x_test, batch_size = 20)
 	y_pred = np.argmax(y_pred, axis=1)
 	y_val = np.argmax(encoded_y_test, axis=1)
-	result = classification_report(y_val, y_pred)      
+	result = classification_report(y_val, y_pred)   
 	print(result)
+	acc = accuracy_score(y_val, y_pred)
+	print("acc = {}".format(acc))   
 
 
 def predict(filename, outfile="predict_result.txt"):

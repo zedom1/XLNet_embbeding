@@ -9,14 +9,21 @@ from keras_xlnet import load_trained_model_from_checkpoint
 from keras.layers import Add, Embedding, Average, Maximum, Concatenate, Lambda
 from keras_xlnet import Tokenizer, ATTENTION_TYPE_BI, ATTENTION_TYPE_UNI
 
+
+def init_tokenizer(spiece_model):
+    global tokenizer
+    tokenizer = Tokenizer(spiece_model)
+
+
 class XlnetEmbedding(object):
     def __init__(self, hyper_parameters):
         self.layer_indexes = hyper_parameters.get('layer_indexes', [-1])
-        self.batch_size = hyper_parameters.get('batch_size', 16)
+        self.batch_size = hyper_parameters.get('batch_size', 4)
         self.len_max = hyper_parameters.get('len_max', 50)
         self.trainable = hyper_parameters.get('trainable', False)
         self.target_len = self.len_max
         self.corpus_path = hyper_parameters['model_path']
+        self.path_fineture = hyper_parameters['path_fineture']
 
         self.checkpoint_path = os.path.join(self.corpus_path, 'xlnet_model.ckpt')
         self.config_path = os.path.join(self.corpus_path, 'xlnet_config.json')
@@ -27,7 +34,9 @@ class XlnetEmbedding(object):
         self.memory_len =  hyper_parameters.get('memory_len', 0)
         self.merge_type = hyper_parameters.get('merge_type', "add").lower()
 
-        self.build()
+        self.built = False
+        init_tokenizer(self.spiece_model)
+        #self.build()
 
     def build(self):
         print('load XLNet model start!')
@@ -41,8 +50,8 @@ class XlnetEmbedding(object):
                                                    target_len=self.target_len,
                                                    batch_size=self.batch_size,
                                                    mask_index=0)
-        # 字典加载
-        self.tokenizer = Tokenizer(self.spiece_model)
+        
+        
         self.model_layers = model.layers
         """
         # debug时候查看layers
@@ -104,28 +113,41 @@ class XlnetEmbedding(object):
         self.model = Model(model.inputs, self.output)
 
         self.embedding_size = self.model.output_shape[-1]
-        self.vocab_size = len(self.tokenizer.sp)
+        self.vocab_size = len(tokenizer.sp)
+
+        self.built = True
+        if os.path.exists(self.path_fineture) and self.trainable:
+            self.model.load_weights(self.path_fineture)
         print("load Keras XLNet Embedding finish")
         #model.summary()
 
-    def sentence2idx(self, text):
-        tokens = self.tokenizer.encode(text)
-        tokens = tokens + [0] * (self.target_len - len(tokens)) \
-                               if len(tokens) < self.target_len \
-                               else tokens[0:self.target_len]
+
+def sentence2idx(target_len, text, text2=None):
+    if text2 == None:
+        tokens = tokenizer.encode(text)[0:target_len-1]
+        tokens = [tokenizer.SYM_PAD] * (target_len - 1 - len(tokens)) + tokens + [tokenizer.SYM_CLS]
         token_input = np.expand_dims(np.array(tokens), axis=0)
         segment_input = np.zeros_like(token_input)
-        memory_length_input = np.zeros((1, 1))
-        return [token_input, segment_input, memory_length_input]
+        segment_input[-1][-1] = 1
+    else:
+        encoded_a, encoded_b = tokenizer.encode(text)[:target_len//2], tokenizer.encode(text2)[:target_len//2]
+        encoded = encoded_a + [tokenizer.SYM_SEP] + encoded_b + [tokenizer.SYM_SEP]
+        token_input = [tokenizer.SYM_PAD] * (target_len - 1 - len(encoded)) + encoded + [tokenizer.SYM_CLS]
+        token_input = np.expand_dims(np.array(token_input), axis=0)
+        
+        """
+        # 方案一： 各自用不同segment id
+        segment = [0] * (len(encoded_a) + 1) + [1] * (len(encoded_b) + 1) + [2]
+        segment_input = [-1] * (target_len - len(segment)) + segment
+        segment_input = np.expand_dims(np.array(segment_input), axis=0)
+        """ 
+        # 方案二： 用全零segment
+        segment_input = np.zeros_like(token_input)
+        segment_input[-1][-1] = 1
 
-    def idx2sentence(self, idx):
-        text = self.tokenizer.decode(idx)
-        return 
+    memory_length_input = np.zeros((1,1))
+    return [token_input, segment_input, memory_length_input]
 
-
-
-def get_embbeding(hyper):
-    word_embedding = XlnetEmbedding(hyper_parameters=hyper)
-    if os.path.exists(hyper["path_fineture"]) and hyper["trainable"]:
-        word_embedding.model.load_weights(hyper["path_fineture"])
-    return word_embedding
+def idx2sentence(self, idx):
+    text = tokenizer.decode(idx)
+    return 
