@@ -1,5 +1,5 @@
 numpy>=1.16.2
 scikit-learn>=0.19.1
-keras==2.2.0
+keras==2.13.1
 keras-bert==0.80.0
 keras-xlnet==0.16.0
